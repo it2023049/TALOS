@@ -1,8 +1,71 @@
-# Transcript Extractor
+# TALOS: Screenshot & Audio Multimodal Extractor to CSV
 
 A Python toolkit for extracting communication evidence from Facebook Messenger and Viber screenshots, email screenshots, and audio recordings.
 
 The pipeline combines OCR, vision-language models, audio transcription and diarization, and case-report context to produce a unified CSV transcript.
+
+> **Current toolkit.** This repository includes evidence-supported time estimation and guarded chat/audio overlap removal. The separate Paper repository preserves the research code snapshot.
+
+## 🧭 Pipeline at a glance
+
+The figure from the current paper draft shows how the evidence package and case report lead to one chronological transcript. Chat and email are extracted from screenshots; audio is transcribed and attributed separately.
+
+![TALOS transcript-extraction workflow](assets/transcript_extraction_pipeline.png)
+
+The output has five columns: `Timestamp`, `Estimated_Timestamp`, `Sender`, `Receiver`, and `Message`. Timestamps use `DD/MM/YYYY HH:MM:SS`. The estimation flag refers to the timestamp, not to confidence in the entire row.
+
+## 🚀 Try the pipeline
+
+After completing [Requirements](#requirements), [Installation](#installation), and [Ollama Setup](#ollama-setup), run from the repository root:
+
+```bash
+python3 chat/mass_extract.py evidence_package.zip \
+  --case-report case_reports/report.pdf \
+  --results-dir results \
+  --model gemma3:12b
+```
+
+See [Quick Start](#quick-start) for the directory, GPU-audio, and diagnostic examples.
+
+## 📊 Results reported in the current paper draft
+
+The paper evaluates a **small mock evidence set**. The following numbers describe its saved evaluation outputs; they are not a claim that every configuration can be reproduced from the current checkout without its original inputs and settings. F1 is the paper's timestamp-agnostic row-level metric: sender and receiver still have to match. Stage rows are unweighted means over reference files; Overall values in the variant table are the evaluator's deduplicated whole-case results.
+
+### Development stages — F1 by modality
+
+| Stage |   Chat |  Audio |  Email |
+| ----: | -----: | -----: | -----: |
+|     1 | 0.4733 |      — |      — |
+|     2 | 0.4925 |      — |      — |
+|     3 | 0.7215 |      — |      — |
+|     4 | 0.7215 | 0.1667 |      — |
+|     5 | 0.5696 | 0.8889 | 1.0000 |
+|     6 | 0.7280 | 1.0000 | 1.0000 |
+|     7 | 0.9617 | 0.9524 | 1.0000 |
+
+A dash means that the modality had not yet entered the development pipeline. Stages changed more than one component, so a difference between stages does not isolate the effect of a single change.
+
+### Final-stage variants — F1 by modality
+
+| Evaluated variant           |   Chat |  Audio |  Email | Overall | Run status         |
+| :-------------------------- | -----: | -----: | -----: | ------: | :----------------- |
+| Gemma3-12B / MOSS           | 0.9617 | 0.9524 | 1.0000 |  0.9847 | Baseline           |
+| Gemma3-12B / WhisperX       | 0.9617 | 0.9524 | 1.0000 |  0.9847 | Completed          |
+| Gemma3-12B / no case report | 0.0000 | 0.0000 | 0.0000 |  0.0000 | Completed ablation |
+
+The no-case-report run produced output, but none of its rows matched the reference under the evaluator's identity-dependent matching rules. Its zeros do not mean that extraction produced no text.
+
+<details>
+<summary>Alternative vision models — diagnostic partial runs</summary>
+
+| Evaluated variant | Chat F1 | Audio F1 | Email F1 | Overall F1 | Run status      |
+| :---------------- | ------: | -------: | -------: | ---------: | :-------------- |
+| LLaVA 13B         |  0.4368 |   0.0000 |   0.0000 |     0.7894 | Partial failure |
+| Qwen2.5-VL 7B     |  0.9390 |   0.5238 |   0.5000 |     0.9635 | Partial failure |
+
+These scores describe only the available transcripts. The failed or missing outputs prevent a complete head-to-head model comparison.
+
+</details>
 
 ## Features
 
@@ -19,6 +82,8 @@ The pipeline combines OCR, vision-language models, audio transcription and diari
 - Bounded correction of OCR word-order and character errors
 - Separate visual verification of sentence punctuation
 - Guarded post-extraction cleanup of chat messages
+- Evidence-supported time assignment for email and audio rows
+- Removal of chat rows covered by timed audio, after audio timestamps are assigned
 - Chronological merging into one CSV
 - Optional intermediate outputs and diagnostic artifacts
 
@@ -64,6 +129,8 @@ The batch orchestrator:
 - runs audio transcription and attribution;
 - maintains chat conversation continuity;
 - applies guarded post-extraction chat cleanup;
+- estimates audio and email times from matching evidence when available;
+- removes chat rows covered by audio only after audio times are assigned;
 - merges results into a unified transcript;
 - optionally retains intermediate outputs and a run manifest.
 
@@ -96,6 +163,9 @@ Processes Viber screenshots and collages, accounting for Viber-specific layouts 
 ### `email/email_extract.py`
 
 Extracts email evidence from supported screenshots for inclusion in the merged transcript.
+When a matching email-header DOCX is beside the screenshot, it uses the header's
+`Date` time only if the sender and date match and a `Received` timestamp
+corroborates it.
 
 ### `audio/audio_diarize.py`
 
@@ -110,6 +180,9 @@ names. A recipient may remain `Unknown` when evidence is insufficient.
 Shared utilities for audio processing, participant attribution, and audio output generation.
 
 ## Requirements
+
+<details>
+<summary>Show requirements and dependencies</summary>
 
 - Python 3.10 or newer
 - Ollama installed and available on `PATH`
@@ -134,7 +207,12 @@ The dependency set includes:
 
 Model downloads may require internet access during initial setup.
 
+</details>
+
 ## Installation
+
+<details>
+<summary>Show installation steps</summary>
 
 Clone the repository using the URL copied from its GitHub page:
 
@@ -156,6 +234,8 @@ Install dependencies:
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
+
+</details>
 
 ## Ollama Setup
 
@@ -190,6 +270,10 @@ Supported processing includes:
 
 Other images may be classified as unsupported and skipped.
 
+An email screenshot may be accompanied by a DOCX file whose name contains
+`header` in the same evidence folder. This file is optional; it can supply the
+email's time when its headers pass the checks described below.
+
 A PDF or TXT case report supplies contextual information such as:
 
 - participant names
@@ -201,6 +285,9 @@ A PDF or TXT case report supplies contextual information such as:
 Case context helps constrain attribution, but it does not guarantee that every sender or receiver will be identified correctly.
 
 ## Quick Start
+
+<details>
+<summary>Show complete quick-start examples</summary>
 
 Run the following commands from the repository root.
 
@@ -271,6 +358,8 @@ python3 chat/mass_extract.py \
 
 Diagnostic outputs may contain the full evidence text. Store them with the same care as the original evidence.
 
+</details>
+
 ## Single-Image Extraction
 
 ### Facebook Messenger
@@ -322,6 +411,9 @@ For an uneven row layout:
 Use one layout override at a time.
 
 ## Chat Extraction and Correction
+
+<details>
+<summary>Show extraction and correction details</summary>
 
 Chat processing includes several distinct stages.
 
@@ -445,6 +537,8 @@ To retain the merged chat transcript before the final text-only pass:
 
 This is not a raw OCR dump: earlier screenshot-level processing has already taken place.
 
+</details>
+
 ## Sender and Receiver Attribution
 
 Chat attribution combines evidence such as:
@@ -514,13 +608,32 @@ Standalone audio CSVs use:
 Offset_Seconds,Sender,Receiver,Message
 ```
 
-During batch merging, audio offsets are combined with an inferred or supplied date. The resulting absolute timestamps are marked as estimated.
+During batch merging, audio offsets are combined with an inferred or supplied
+date. When there is a strong match to a timestamped chat message, a related
+timed recording, or relevant time evidence in the case report, the pipeline
+estimates the recording's start time and adds each speaker turn's offset in
+seconds. Without supported time evidence, the time may remain `00:00:00`.
+The resulting absolute timestamps are marked as estimated. After this timing
+step, strongly overlapping chat rows can be removed when their sender,
+receiver, date, time, and text match the audio. The fuller of two substantially
+overlapping audio turns is retained.
+For chat/audio overlap removal, the timestamps may differ by up to 30 minutes;
+the same date and participants plus strong word overlap are also required.
 
 ### Email
 
-Email rows use the unified schema. Review whether the date and time were visible in the source or inferred by the extraction and merge process.
+Email rows use the unified schema. The email extractor first looks for a
+same-folder DOCX header file with a matching sender and date, and accepts its
+`Date` time only when a nearby `Received` time corroborates it. If this does
+not yield a unique time, the batch merge may select a directly related time
+from the case report or a timestamped chat message. Otherwise the time remains
+`00:00:00`. Email rows are marked `Estimated_Timestamp=True`, including when
+their time comes from a companion header rather than the screenshot itself.
 
 ## Useful Batch Options
+
+<details>
+<summary>Show command-line options</summary>
 
 | Option                                          | Purpose                                       |
 | ----------------------------------------------- | --------------------------------------------- |
@@ -560,6 +673,8 @@ python3 chat/viber_extract.py --help
 python3 email/email_extract.py --help
 python3 audio/audio_diarize.py --help
 ```
+
+</details>
 
 ## Limitations
 
