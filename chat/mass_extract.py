@@ -18,6 +18,7 @@ import glob
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1408,6 +1409,172 @@ def parse_chat_datetime(time_value: str) -> Tuple[int, datetime]:
         except ValueError:
             pass
     return 1, datetime.max
+
+def _word_coverage(short: str, long: str) -> Tuple[int, float, int]:
+    a = re.findall(r"[^\W_]+", str(short).casefold(), flags=re.UNICODE)
+    b = re.findall(r"[^\W_]+", str(long).casefold(), flags=re.UNICODE)
+    if len(a) < 8:
+        return len(a), 0.0, 0
+    blocks = SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks()
+    return len(a), sum(block.size for block in blocks) / len(a), max(block.size for block in blocks)
+
+def audio_anchor_from_chats(audio_rows: Sequence[Dict[str, str]], chat_rows: Sequence[Dict[str, str]]) -> Tuple[Optional[datetime], str]:
+    if not audio_rows:
+        return None, ""
+    rank, first = parse_chat_datetime(audio_rows[0].get("Timestamp", ""))
+    if rank:
+        return None, ""
+    candidates = []
+    for audio in audio_rows:
+        try:
+            offset = float(audio.get("_offset_seconds", ""))
+        except ValueError:
+            continue
+        if not 0 <= offset < 86400:
+            continue
+        for chat in chat_rows:
+            if chat.get("_source_kind") != "chat" or normalize_estimated_timestamp(chat.get("Estimated_Timestamp", "")) != "False":
+                continue
+            cr, chat_dt = parse_chat_datetime(chat.get("Timestamp", ""))
+            if cr or chat_dt.date() != first.date() or chat_dt.time() == datetime.min.time():
+                continue
+            if any(str(audio.get(field, "")).casefold() != str(chat.get(field, "")).casefold() for field in ("Sender", "Receiver")):
+                continue
+            n, coverage, longest = _word_coverage(chat.get("Message", ""), audio.get("Message", ""))
+            if longest < 8 or not ((n >= 20 and coverage >= 0.88) or (n >= 8 and coverage >= 0.97)):
+                continue
+            start = chat_dt - timedelta(seconds=offset)
+            if start.date() == first.date():
+                identity = (chat.get("_source_csv", ""), chat.get("_source_row", ""))
+                candidates.append((offset, chat_dt, -n, start, identity, coverage))
+    if not candidates or (not any(-item[2] >= 20 for item in candidates) and len({item[4] for item in candidates}) < 2):
+        return None, ""
+    offset, chat_dt, neg_n, start, identity, coverage = min(candidates, key=lambda item: (item[0], item[1], item[2]))
+    return start, f"chat text match {identity[0]}:{identity[1]} coverage={coverage:.3f}"
+
+def audio_anchor_from_timed_recording(
+    group: Sequence[Dict[str, str]],
+    all_audio_rows: Sequence[Dict[str, str]],
+) -> Tuple[Optional[datetime], str]:
+    """Transfer a known recording clock through a unique matching audio turn."""
+    if not group:
+        return None, ""
+    rank, first = parse_chat_datetime(group[0].get("Timestamp", ""))
+    if rank:
+        return None, ""
+    starts: List[Tuple[datetime, Dict[str, str], int]] = []
+    for row in group:
+        try:
+            offset = float(row.get("_offset_seconds", ""))
+        except ValueError:
+            continue
+        for donor in all_audio_rows:
+            if (donor.get("_source_kind") != "audio"
+                    or not donor.get("_time_basis")
+                    or donor.get("_source_audio") == row.get("_source_audio")):
+                continue
+            donor_rank, donor_time = parse_chat_datetime(donor.get("Timestamp", ""))
+            if donor_rank or donor_time.date() != first.date():
+                continue
+            if any(str(row.get(field, "")).strip().casefold()
+                   != str(donor.get(field, "")).strip().casefold()
+                   for field in ("Sender", "Receiver")):
+                continue
+            shorter, longer = sorted(
+                (row.get("Message", ""), donor.get("Message", "")),
+                key=lambda value: len(re.findall(r"[^\W_]+", value, flags=re.UNICODE)),
+            )
+            n, coverage, longest = _word_coverage(shorter, longer)
+            if n < 20 or coverage < 0.97 or longest < 20:
+                continue
+            start = donor_time - timedelta(seconds=offset)
+            if start.date() == first.date():
+                starts.append((start, donor, longest))
+    if not starts:
+        return None, ""
+    # Repeated matching phrases at materially different times are ambiguous.
+    if (max(item[0] for item in starts) - min(item[0] for item in starts)).total_seconds() > 2:
+        return None, ""
+    start, donor, longest = max(starts, key=lambda item: item[2])
+    return start, (f"matching timed audio {donor.get('_source_audio', '')}:"
+                   f"{donor.get('_source_row', '')}; consecutive_words={longest}")
+
+def _report_time_options(report_text: str, day: datetime) -> Dict[str, str]:
+    report = re.sub(r"\s+", " ", report_text)
+    markers = (
+        f"{day.day:02d}/{day.month:02d}/{day.year}",
+        f"{day.day}/{day.month}/{day.year}",
+        f"{day.day} {day:%B} {day.year}",
+        f"{day:%B} {day.day}, {day.year}",
+        f"{day.year}-{day.month:02d}-{day.day:02d}",
+    )
+    clock_pattern = re.compile(r"(?<!\d)(?P<h>\d{1,2}):(?P<m>[0-5]\d)(?::(?P<s>[0-5]\d))?\s*(?P<ap>am|pm)?(?!\d)", re.I)
+    options: Dict[str, str] = {}
+    for marker in markers:
+        for found in re.finditer(re.escape(marker), report, flags=re.I):
+            excerpt = report[max(0, found.start() - 80):found.end() + 260]
+            for match in clock_pattern.finditer(excerpt):
+                hour = int(match.group("h"))
+                minute = int(match.group("m"))
+                second = int(match.group("s") or 0)
+                ap = (match.group("ap") or "").casefold()
+                if ap:
+                    if not 1 <= hour <= 12:
+                        continue
+                    hour = hour % 12 + (12 if ap == "pm" else 0)
+                if hour > 23 or (hour == minute == second == 0):
+                    continue
+                options[f"{hour:02d}:{minute:02d}:{second:02d}"] = f"case report: {excerpt[:340]}"
+    return options
+
+def context_clock_from_evidence(kind: str, source_name: str, day: datetime, summary: str, chat_rows: Sequence[Dict[str, str]], report_text: str, model: str, host: str) -> Tuple[Optional[str], str]:
+    options = _report_time_options(report_text, day)
+    summary_tokens = _audio_date_context_tokens(summary)
+    relevant = []
+    for row in chat_rows:
+        if row.get("_source_kind") != "chat" or normalize_estimated_timestamp(row.get("Estimated_Timestamp", "")) != "False":
+            continue
+        rank, dt = parse_chat_datetime(row.get("Timestamp", ""))
+        if rank or dt.date() != day.date() or dt.time() == datetime.min.time():
+            continue
+        overlap = len(summary_tokens & _audio_date_context_tokens(row.get("Message", "")))
+        if overlap >= 3:
+            relevant.append((overlap, dt, row))
+    for _, dt, row in sorted(relevant, key=lambda item: (-item[0], item[1]))[:20]:
+        options.setdefault(dt.strftime("%H:%M:%S"), f"same-day chat: {row.get('Sender', '')} -> {row.get('Receiver', '')}: {row.get('Message', '')[:240]}")
+    if not options:
+        return None, "no time evidence"
+    prompt = f"""Estimate the approximate time of this {kind}, on {day:%d/%m/%Y}.
+Choose ONLY one HH:MM:SS from ALLOWED TIMES, or Unknown.
+A chat time is usable only if its content directly corresponds to this evidence.
+A report time is usable only if the excerpt describes this evidence.
+If there is no direct temporal support, return Unknown. Do not use a generic
+morning/afternoon/noon guess. Ignore business/support hours, durations and
+times of unrelated events. Return JSON only:
+{{"time":"HH:MM:SS or Unknown","confidence":"high|medium|low","reason":"brief citation"}}
+
+SOURCE: {source_name}
+EVIDENCE TEXT: {summary[:12000]}
+ALLOWED TIMES AND THEIR SOURCES:
+{json.dumps(options, ensure_ascii=False)}
+"""
+    try:
+        import ollama
+        response = ollama.Client(host=normalize_http_base_url(host)).chat(
+            model=model, messages=[{"role": "user", "content": prompt}],
+            format="json", options={"temperature": 0},
+        )
+        data = _parse_json_object(response["message"]["content"])
+        value = str(data.get("time", "")).strip()
+        match = re.fullmatch(r"(\d{1,2}):([0-5]\d)(?::([0-5]\d))?", value)
+        if match is None or str(data.get("confidence", "")).casefold() not in {"high", "medium"}:
+            return None, "model found no supported time"
+        value = f"{int(match.group(1)):02d}:{match.group(2)}:{match.group(3) or '00'}"
+        if value not in options or not str(data.get("reason", "")).strip():
+            return None, "time not supported by candidate evidence"
+        return value, f"{options[value]}; model reason: {str(data['reason'])[:300]}"
+    except Exception as exc:
+        return None, f"time inference failed: {exc}"
 
 def normalize_message_for_dedupe(message: str) -> str:
     """Normalizes message text only for duplicate-row detection."""
@@ -3214,6 +3381,85 @@ def main() -> int:
         )
         audio_dedupe_summary["attribution_from_overlap"] = audio_overlap_decisions
         audio_dedupe_summary["attribution_from_context"] = audio_context_decisions
+        audio_dedupe_summary["time_estimation"] = []
+        by_source: Dict[str, List[Dict[str, str]]] = {}
+        for row in selected_audio_rows:
+            by_source.setdefault(row.get("_source_audio", ""), []).append(row)
+        for source_name, group in by_source.items():
+            rank, day = parse_chat_datetime(group[0].get("Timestamp", ""))
+            if rank:
+                continue
+            anchor, basis = audio_anchor_from_chats(group, chat_rows)
+            if anchor is None:
+                clock, basis = context_clock_from_evidence(
+                    kind="audio",
+                    source_name=Path(source_name).name,
+                    day=day,
+                    summary=" ".join(row.get("Message", "") for row in group),
+                    chat_rows=chat_rows,
+                    report_text=report_text_for_audio_dates,
+                    model=args.audio_ollama_model or args.model,
+                    host=args.audio_ollama_host or args.chat_polish_host
+                    or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
+                )
+                if clock:
+                    anchor = datetime.strptime(
+                        f"{day:%d/%m/%Y} {clock}", "%d/%m/%Y %H:%M:%S"
+                    )
+            if anchor is None:
+                audio_dedupe_summary["time_estimation"].append({
+                    "source": source_name, "status": "unknown", "reason": basis,
+                })
+                continue
+            max_offset = max(float(row.get("_offset_seconds", "0")) for row in group)
+            if (anchor + timedelta(seconds=max_offset)).date() != day.date():
+                audio_dedupe_summary["time_estimation"].append({
+                    "source": source_name, "status": "unknown",
+                    "reason": "estimated start would move a turn to another date",
+                })
+                continue
+            for row in group:
+                offset = float(row.get("_offset_seconds", "0"))
+                row["Timestamp"] = (anchor + timedelta(seconds=offset)).strftime(
+                    "%d/%m/%Y %H:%M:%S"
+                )
+                row["_time_basis"] = basis
+            audio_dedupe_summary["time_estimation"].append({
+                "source": source_name, "status": "estimated",
+                "start": anchor.strftime("%d/%m/%Y %H:%M:%S"),
+                "reason": basis,
+            })
+
+        # A standalone clip can share speech with a call whose clock was just
+        # inferred. Propagate that clock after the first pass so processing
+        # order cannot leave the standalone clip at 00:00:00.
+        for source_name, group in by_source.items():
+            if any(row.get("_time_basis") for row in group):
+                continue
+            anchor, basis = audio_anchor_from_timed_recording(
+                group, selected_audio_rows,
+            )
+            if anchor is None:
+                continue
+            rank, day = parse_chat_datetime(group[0].get("Timestamp", ""))
+            if rank or (anchor + timedelta(seconds=max(
+                    float(row.get("_offset_seconds", "0")) for row in group
+            ))).date() != day.date():
+                continue
+            for row in group:
+                offset = float(row.get("_offset_seconds", "0"))
+                row["Timestamp"] = (anchor + timedelta(seconds=offset)).strftime(
+                    "%d/%m/%Y %H:%M:%S"
+                )
+                row["_time_basis"] = basis
+            for entry in audio_dedupe_summary["time_estimation"]:
+                if entry.get("source") == source_name:
+                    entry.update({
+                        "status": "estimated",
+                        "start": anchor.strftime("%d/%m/%Y %H:%M:%S"),
+                        "reason": basis,
+                    })
+                    break
         all_rows.extend(selected_audio_rows)
         print(
             "[INFO] Audio deduplication: "
@@ -3237,6 +3483,9 @@ def main() -> int:
 
     # Email extraction is deliberately last. It cannot influence chat polish
     # or audio date/context inference.
+    report_text_for_email_times = (
+        read_case_report_text(input_plan.report_path) if deferred_emails else ""
+    )
     for image_path, extractor_csv_path, extractor_debug_dir, record in deferred_emails:
         csv_path = run_extractor(
             platform="email",
@@ -3265,6 +3514,23 @@ def main() -> int:
             for row in rows:
                 row["Estimated_Timestamp"] = "True"
                 row["_source_kind"] = "email"
+                rank, stamp = parse_chat_datetime(row.get("Timestamp", ""))
+                if rank == 0 and stamp.time() == datetime.min.time():
+                    clock, basis = context_clock_from_evidence(
+                        kind="email",
+                        source_name=image_path.name,
+                        day=stamp,
+                        summary=row.get("Message", ""),
+                        chat_rows=chat_rows,
+                        report_text=report_text_for_email_times,
+                        model=args.model,
+                        host=args.chat_polish_host
+                        or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
+                    )
+                    record["time_inference"] = basis
+                    if clock:
+                        row["Timestamp"] = f"{stamp:%d/%m/%Y} {clock}"
+                        row["_time_basis"] = basis
             print(f"-> Email rows read: {len(rows)}")
             if rows:
                 all_rows.extend(rows)

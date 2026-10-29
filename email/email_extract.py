@@ -16,10 +16,13 @@ import re
 import sys
 import tempfile
 import unicodedata
-from datetime import datetime
+import zipfile
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
+from xml.etree import ElementTree as ET
 
 try:
     from PyPDF2 import PdfReader
@@ -446,6 +449,76 @@ def normalize_date(date_text: Any, report_year: int) -> str:
             return ""
 
     return ""
+
+
+def email_clock_from_companion_headers(
+    image_path: Path, normalized_date: str, sender: str,
+) -> Tuple[str, str]:
+    """Read an email time from a matching header DOCX beside the screenshot.
+
+    The header is separate evidence, not text visible in the screenshot. A
+    sender-supplied Date is accepted only when a Received header corroborates
+    it and its date agrees with the screenshot-derived date.
+    """
+    if not normalized_date:
+        return "", "no screenshot-derived date"
+    try:
+        screenshot_date = datetime.strptime(normalized_date, "%d/%m/%Y").date()
+    except ValueError:
+        return "", "invalid screenshot-derived date"
+    sender_tokens = set(re.findall(r"[a-z0-9]{3,}", sender.casefold()))
+    if len(sender_tokens) < 2:
+        return "", "sender too short for safe header matching"
+
+    matches: List[Tuple[str, str]] = []
+    for path in image_path.parent.iterdir():
+        if not (path.is_file() and path.suffix.lower() == ".docx"
+                and "header" in path.name.casefold()):
+            continue
+        try:
+            with zipfile.ZipFile(path) as docx:
+                document = ET.fromstring(docx.read("word/document.xml"))
+            w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = [
+                "".join(node.text or "" for node in paragraph.iter(w + "t"))
+                for paragraph in document.iter(w + "p")
+            ]
+            header = "\n".join(paragraphs).split("--Email Body", 1)[0]
+            from_line = re.search(r"(?mi)^From:\s*([^\r\n]+)", header)
+            date_line = re.search(r"(?mi)^Date:\s*([^\r\n]+)", header)
+            if not from_line or not date_line:
+                continue
+            from_tokens = set(re.findall(r"[a-z0-9]{3,}", from_line.group(1).casefold()))
+            if not sender_tokens.issubset(from_tokens):
+                continue
+            sent = parsedate_to_datetime(date_line.group(1).strip())
+            if sent.utcoffset() is None or sent.date() != screenshot_date:
+                continue
+
+            received_block = re.search(
+                r"(?ms)^Received:.*?(?=^[A-Za-z][A-Za-z-]*:|\Z)", header
+            )
+            if not received_block:
+                continue
+            received_dates = re.findall(
+                r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+"
+                r"[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4}",
+                received_block.group(0), flags=re.I,
+            )
+            if not received_dates:
+                continue
+            received = parsedate_to_datetime(received_dates[-1])
+            delay = received - sent
+            if not -timedelta(minutes=2) <= delay <= timedelta(minutes=10):
+                continue
+            matches.append((sent.strftime("%H:%M:%S"), path.name))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError):
+            continue
+
+    if len({clock for clock, _ in matches}) != 1:
+        return "", "no unique, corroborated companion email header"
+    clock, filename = matches[0]
+    return clock, f"companion email header {filename}; Date corroborated by Received"
 
 
 def report_excerpt(report_text: str, draft: Dict[str, Any], max_chars: int = 4500) -> str:
@@ -2490,9 +2563,17 @@ def main() -> int:
         normalized_email_date = normalize_date(
             resolved.get("date_text") or draft.get("date_text"), report_year,
         )
+        sender = choose_sender(draft, resolved, report_text)
+        header_clock, header_clock_basis = email_clock_from_companion_headers(
+            image_path, normalized_email_date, sender,
+        )
+        message_debug["email_time_basis"] = header_clock_basis
         record = {
-            "Time": f"{normalized_email_date} 00:00:00" if normalized_email_date else "",
-            "Sender": choose_sender(draft, resolved, report_text),
+            "Time": (
+                f"{normalized_email_date} {header_clock or '00:00:00'}"
+                if normalized_email_date else ""
+            ),
+            "Sender": sender,
             "Receiver": choose_receiver(draft, resolved, report_text),
             "Message": message,
         }
