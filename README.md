@@ -4,11 +4,11 @@ A Python toolkit for extracting communication evidence from Facebook Messenger a
 
 The pipeline combines OCR, vision-language models, audio transcription and diarization, and case-report context to produce a unified CSV transcript.
 
-> **Current toolkit.** This repository includes evidence-supported time estimation and guarded chat/audio overlap removal. The separate Paper repository preserves the research code snapshot.
+> **Repository scope.** This TALOS repository includes evidence-supported time estimation. The later chat/audio overlap-removal change is in the separate [KModelC Transcript Extractor](https://github.com/it2023049/kmodelc-transcript-extractor) repository.
 
 ## 🧭 Pipeline at a glance
 
-The figure from the current paper draft shows how the evidence package and case report lead to one chronological transcript. Chat and email are extracted from screenshots; audio is transcribed and attributed separately.
+The diagram below summarizes how an evidence package and case report lead to one chronological transcript. Chat and email are extracted from screenshots; audio is transcribed and attributed separately.
 
 ![TALOS transcript-extraction workflow](assets/transcript_extraction_pipeline.png)
 
@@ -41,9 +41,9 @@ The paper evaluates a **small mock evidence set**. The following numbers describ
 |     4 | 0.7215 | 0.1667 |      — |
 |     5 | 0.5696 | 0.8889 | 1.0000 |
 |     6 | 0.7280 | 1.0000 | 1.0000 |
-|     7 | 0.9617 | 0.9524 | 1.0000 |
+|     7 | 0.9617 | 0.6413 | 1.0000 |
 
-A dash means that the modality had not yet entered the development pipeline. Stages changed more than one component, so a difference between stages does not isolate the effect of a single change.
+A dash means that the modality had not yet entered the development pipeline. The Stage 7 audio score is from the historical development run; the later Gemma3-12B/MOSS baseline below is a separate run. Stages changed more than one component, so a difference between stages does not isolate the effect of a single change.
 
 ### Final-stage variants — F1 by modality
 
@@ -51,9 +51,8 @@ A dash means that the modality had not yet entered the development pipeline. Sta
 | :-------------------------- | -----: | -----: | -----: | ------: | :----------------- |
 | Gemma3-12B / MOSS           | 0.9617 | 0.9524 | 1.0000 |  0.9847 | Baseline           |
 | Gemma3-12B / WhisperX       | 0.9617 | 0.9524 | 1.0000 |  0.9847 | Completed          |
-| Gemma3-12B / no case report | 0.0000 | 0.0000 | 0.0000 |  0.0000 | Completed ablation |
 
-The no-case-report run produced output, but none of its rows matched the reference under the evaluator's identity-dependent matching rules. Its zeros do not mean that extraction produced no text.
+A separate no-case-report run, omitted from the paper's variant table, produced 256 rows. None matched the reference under the evaluator's identity-dependent matching rules, so its zero F1 does not mean that extraction produced no text.
 
 <details>
 <summary>Alternative vision models — diagnostic partial runs</summary>
@@ -83,7 +82,7 @@ These scores describe only the available transcripts. The failed or missing outp
 - Separate visual verification of sentence punctuation
 - Guarded post-extraction cleanup of chat messages
 - Evidence-supported time assignment for email and audio rows
-- Removal of chat rows covered by timed audio, after audio timestamps are assigned
+- Conservative deduplication of repeated chat rows and audio recordings
 - Chronological merging into one CSV
 - Optional intermediate outputs and diagnostic artifacts
 
@@ -130,7 +129,7 @@ The batch orchestrator:
 - maintains chat conversation continuity;
 - applies guarded post-extraction chat cleanup;
 - estimates audio and email times from matching evidence when available;
-- removes chat rows covered by audio only after audio times are assigned;
+- conservatively deduplicates repeated chat rows and audio recordings;
 - merges results into a unified transcript;
 - optionally retains intermediate outputs and a run manifest.
 
@@ -596,9 +595,9 @@ Rows with generated seconds are marked as estimated.
 
 ### Viber
 
-Visible message times are normalized, with `:00` added when seconds are not shown.
+Visible message times are normalized, with `:00` added for CSV formatting when seconds are not shown. This padding does not mean that the second was observed.
 
-The current Viber pipeline marks these timestamps as non-estimated.
+The current Viber pipeline marks these visible-minute timestamps as non-estimated; the padding alone does not set the estimation flag.
 
 ### Audio
 
@@ -613,12 +612,9 @@ date. When there is a strong match to a timestamped chat message, a related
 timed recording, or relevant time evidence in the case report, the pipeline
 estimates the recording's start time and adds each speaker turn's offset in
 seconds. Without supported time evidence, the time may remain `00:00:00`.
-The resulting absolute timestamps are marked as estimated. After this timing
-step, strongly overlapping chat rows can be removed when their sender,
-receiver, date, time, and text match the audio. The fuller of two substantially
-overlapping audio turns is retained.
-For chat/audio overlap removal, the timestamps may differ by up to 30 minutes;
-the same date and participants plus strong word overlap are also required.
+The resulting absolute timestamps are marked as estimated. Substantially
+duplicate audio recordings are conservatively deduplicated; this repository
+does not remove chat rows merely because they overlap with audio.
 
 ### Email
 
