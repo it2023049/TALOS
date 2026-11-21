@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/talos_bronze_mascot.png" alt="TALOS bronze automaton mascot" width="190">
+</p>
+
 # TALOS: Screenshot & Audio Multimodal Extractor to CSV
 
 A Python toolkit for extracting communication evidence from Facebook Messenger and Viber screenshots, email screenshots, and audio recordings.
