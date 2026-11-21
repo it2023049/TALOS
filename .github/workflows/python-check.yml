@@ -28,21 +28,21 @@ jobs:
 
       - name: Verify expected source files
         run: |
-          test -f chat/mass_extract.py
-          test -f chat/facebook_extract.py
-          test -f chat/viber_extract.py
-          test -f chat/extractor_utils.py
-          test -f audio/audio_diarize.py
-          test -f audio/audio_utils.py
-          test -f email/email_extract.py
+          test -f src/chat/mass_extract.py
+          test -f src/chat/facebook_extract.py
+          test -f src/chat/viber_extract.py
+          test -f src/chat/extractor_utils.py
+          test -f src/audio/audio_diarize.py
+          test -f src/audio/audio_utils.py
+          test -f src/email/email_extract.py
 
       - name: Compile Python files
         run: |
           python -m py_compile \
-            chat/mass_extract.py \
-            chat/facebook_extract.py \
-            chat/viber_extract.py \
-            chat/extractor_utils.py \
-            audio/audio_diarize.py \
-            audio/audio_utils.py \
-            email/email_extract.py
+            src/chat/mass_extract.py \
+            src/chat/facebook_extract.py \
+            src/chat/viber_extract.py \
+            src/chat/extractor_utils.py \
+            src/audio/audio_diarize.py \
+            src/audio/audio_utils.py \
+            src/email/email_extract.py

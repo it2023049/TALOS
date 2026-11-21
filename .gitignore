@@ -49,7 +49,7 @@ evidence/
 images/
 recordings/
 audio/
-!/audio/
+!/src/audio/
 video/
 email_screenshots/
 case_reports/

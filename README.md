@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/talos_bronze_mascot.png" alt="TALOS bronze automaton mascot" width="190">
+  <img src="assets/talos_bronze_mascot.png" alt="TALOS bronze automaton mascot" width="150">
 </p>
 
 # TALOS: Screenshot & Audio Multimodal Extractor to CSV
@@ -23,7 +23,7 @@ The output has five columns: `Timestamp`, `Estimated_Timestamp`, `Sender`, `Rece
 After completing [Requirements](#requirements), [Installation](#installation), and [Ollama Setup](#ollama-setup), run from the repository root:
 
 ```bash
-python3 chat/mass_extract.py evidence_package.zip \
+python3 src/chat/mass_extract.py evidence_package.zip \
   --case-report case_reports/report.pdf \
   --results-dir results \
   --model gemma3:12b
@@ -103,16 +103,17 @@ This is a research tool. Extracted transcripts and participant assignments requi
 ├── LICENSE
 ├── README.md
 ├── requirements.txt
-├── chat/
-│   ├── extractor_utils.py
-│   ├── facebook_extract.py
-│   ├── viber_extract.py
-│   └── mass_extract.py
-├── email/
-│   └── email_extract.py
-└── audio/
-    ├── audio_diarize.py
-    └── audio_utils.py
+└── src/
+    ├── chat/
+    │   ├── extractor_utils.py
+    │   ├── facebook_extract.py
+    │   ├── viber_extract.py
+    │   └── mass_extract.py
+    ├── email/
+    │   └── email_extract.py
+    └── audio/
+        ├── audio_diarize.py
+        └── audio_utils.py
 ```
 
 Keep the repository layout intact. The batch orchestrator discovers the email and audio scripts through their sibling directories.
@@ -121,7 +122,7 @@ Use matching versions of the shared utilities and extractors.
 
 ## Components
 
-### `chat/mass_extract.py`
+### `src/chat/mass_extract.py`
 
 The batch orchestrator:
 
@@ -137,7 +138,7 @@ The batch orchestrator:
 - merges results into a unified transcript;
 - optionally retains intermediate outputs and a run manifest.
 
-### `chat/extractor_utils.py`
+### `src/chat/extractor_utils.py`
 
 Shared chat functionality, including:
 
@@ -153,24 +154,24 @@ Shared chat functionality, including:
 
 The literal-repair functionality is integrated into this file. A separate `literal_repairs.py` module is not required.
 
-### `chat/facebook_extract.py`
+### `src/chat/facebook_extract.py`
 
 Processes Facebook Messenger screenshots and collages.
 
 It uses OCR geometry, visual evidence, and case context to extract messages and resolve their senders and receivers. It also handles screen-level timestamps and deterministic ordering of messages without individual visible times.
 
-### `chat/viber_extract.py`
+### `src/chat/viber_extract.py`
 
 Processes Viber screenshots and collages, accounting for Viber-specific layouts and visible message timestamps.
 
-### `email/email_extract.py`
+### `src/email/email_extract.py`
 
 Extracts email evidence from supported screenshots for inclusion in the merged transcript.
 When a matching email-header DOCX is beside the screenshot, it uses the header's
 `Date` time only if the sender and date match and a `Received` timestamp
 corroborates it.
 
-### `audio/audio_diarize.py`
+### `src/audio/audio_diarize.py`
 
 Runs MOSS transcription and speaker diarization. For participant attribution,
 the optional Ollama pass analyzes the case report and the complete anonymous
@@ -178,7 +179,7 @@ speaker-turn transcript. It keeps a stable identity for each speaker label
 within a recording and checks conflicting self-identification before assigning
 names. A recipient may remain `Unknown` when evidence is insufficient.
 
-### `audio/audio_utils.py`
+### `src/audio/audio_utils.py`
 
 Shared utilities for audio processing, participant attribution, and audio output generation.
 
@@ -297,7 +298,7 @@ Run the following commands from the repository root.
 ### Process a ZIP package
 
 ```bash
-python3 chat/mass_extract.py \
+python3 src/chat/mass_extract.py \
   evidence_package.zip \
   --case-report case_reports/report.pdf \
   --results-dir results \
@@ -307,7 +308,7 @@ python3 chat/mass_extract.py \
 ### Process an evidence directory
 
 ```bash
-python3 chat/mass_extract.py \
+python3 src/chat/mass_extract.py \
   evidence/ \
   --case-report case_reports/report.pdf \
   --results-dir results \
@@ -319,7 +320,7 @@ python3 chat/mass_extract.py \
 If the evidence package contains a discoverable case report:
 
 ```bash
-python3 chat/mass_extract.py evidence_package.zip
+python3 src/chat/mass_extract.py evidence_package.zip
 ```
 
 Pass `--case-report` explicitly when automatic discovery cannot identify the intended report.
@@ -327,7 +328,7 @@ Pass `--case-report` explicitly when automatic discovery cannot identify the int
 ### Full pipeline with local GPU audio processing
 
 ```bash
-python3 chat/mass_extract.py \
+python3 src/chat/mass_extract.py \
   evidence_package.zip \
   --case-report case_reports/report.pdf \
   --results-dir results \
@@ -344,7 +345,7 @@ Select an audio dtype supported by your hardware.
 ### Diagnostic run
 
 ```bash
-python3 chat/mass_extract.py \
+python3 src/chat/mass_extract.py \
   evidence_package.zip \
   --case-report case_reports/report.pdf \
   --results-dir results/debug \
@@ -368,7 +369,7 @@ Diagnostic outputs may contain the full evidence text. Store them with the same 
 ### Facebook Messenger
 
 ```bash
-python3 chat/facebook_extract.py \
+python3 src/chat/facebook_extract.py \
   images/facebook_example.png \
   case_reports/report.pdf \
   --model gemma3:12b \
@@ -384,7 +385,7 @@ python3 chat/facebook_extract.py \
 ### Viber
 
 ```bash
-python3 chat/viber_extract.py \
+python3 src/chat/viber_extract.py \
   images/viber_example.png \
   case_reports/report.pdf \
   --model gemma3:12b \
@@ -493,7 +494,7 @@ Disable a feature by setting its value to `0`:
 
 ```bash
 TRANSCRIPT_EXTRACTOR_VISUAL_PUNCTUATION=0 \
-python3 chat/mass_extract.py \
+python3 src/chat/mass_extract.py \
   evidence_package.zip \
   --case-report case_reports/report.pdf
 ```
@@ -667,11 +668,11 @@ their time comes from a companion header rather than the screenshot itself.
 For the complete argument list:
 
 ```bash
-python3 chat/mass_extract.py --help
-python3 chat/facebook_extract.py --help
-python3 chat/viber_extract.py --help
-python3 email/email_extract.py --help
-python3 audio/audio_diarize.py --help
+python3 src/chat/mass_extract.py --help
+python3 src/chat/facebook_extract.py --help
+python3 src/chat/viber_extract.py --help
+python3 src/email/email_extract.py --help
+python3 src/audio/audio_diarize.py --help
 ```
 
 </details>
